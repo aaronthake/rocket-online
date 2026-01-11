@@ -70,7 +70,48 @@
   const canvas = document.getElementById("c");
   const ctx = canvas.getContext("2d");
   const countdownEl = document.getElementById("countdown");
+const soundBtn = document.getElementById("soundBtn");
 
+const Sound = (() => {
+  let ac=null, master=null, muted=true;
+
+  function ensure(){
+    if(!ac){
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      ac = new AudioContext();
+      master = ac.createGain();
+      master.connect(ac.destination);
+      master.gain.value = 0.0; // start muted
+    }
+    ac.resume?.();
+  }
+
+  function toggle(){
+    ensure();
+    muted = !muted;
+    master.gain.value = muted ? 0.0 : 0.55;
+    soundBtn.textContent = `Sound: ${muted ? "OFF" : "ON"}`;
+  }
+
+  function isMuted(){ return muted; }
+
+  // tiny beep you can use later if you want
+  function beep(freq=700, dur=0.08){
+    if(!ac || muted || ac.state !== "running") return;
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.frequency.value = freq;
+    g.gain.value = 0.12;
+    o.connect(g); g.connect(master);
+    o.start();
+    o.stop(ac.currentTime + dur);
+  }
+
+  return { toggle, isMuted, beep };
+})();
+
+soundBtn.addEventListener("click", () => Sound.toggle());
+soundBtn.textContent = "Sound: OFF";
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 
   // ---------- Networking ----------
