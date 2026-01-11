@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rocket League Mini — Online</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{margin:0;background:#0b1020;color:#e8eefc;font-family:system-ui}
+  #wrap{display:flex;flex-direction:column;align-items:center;padding:12px;gap:10px}
+  #top{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center}
+  input,button{
+    border-radius:10px;border:1px solid rgba(255,255,255,.18);
+    background:#0a1e3b;color:#e8eefc;padding:10px 12px;font-weight:700
+  }
+  input{width:140px}
+  #status{opacity:.85;font-weight:700}
+  #stage{position:relative}
+  canvas{background:#061018;border-radius:12px;border:1px solid rgba(255,255,255,.15)}
+
+  #countdown{
+    position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    font-weight:900; font-size:110px;
+    letter-spacing:2px;
+    text-shadow:0 12px 40px rgba(0,0,0,.65);
+    pointer-events:none; opacity:0;
+    transition:opacity .15s;
+  }
+
+  /* Sound toggle (always visible) */
+  #soundBtn{
+    position:absolute;
+    right:12px;
+    bottom:12px;
+    z-index:5;
+    padding:10px 14px;
+    border-radius:12px;
+    border:1px solid rgba(255,255,255,.18);
+    background:rgba(10,30,59,.90);
+    color:#e8eefc;
+    font-weight:800;
+    cursor:pointer;
+    user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #soundBtn:active{transform:scale(.98)}
+
+  #hint{max-width:980px;opacity:.8;font-size:14px;line-height:1.35;text-align:center}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="top">
+    <button id="createBtn">Create room</button>
+    <input id="code" placeholder="ROOM CODE" maxlength="5" />
+    <button id="joinBtn">Join room</button>
+    <span id="status">Not connected</span>
+  </div>
+
+  <div id="stage">
+    <canvas id="c" width="980" height="560"></canvas>
+    <div id="countdown"></div>
+    <button id="soundBtn" type="button">Sound: OFF</button>
+  </div>
+
+  <div id="hint">
+    Controls: <b>W</b>/<b>S</b> accelerate brake+reverse, <b>A</b>/<b>D</b> steer, <b>Space</b> drift, <b>Shift</b> boost. Controller still works too.
+    <br>Player 1 is blue. Player 2 is red. Share the page link + room code.
+  </div>
+</div>
+
+<script>
+(() => {
+  const createBtn = document.getElementById("createBtn");
+  const joinBtn = document.getElementById("joinBtn");
+  const codeEl = document.getElementById("code");
+  const statusEl = document.getElementById("status");
+  const soundBtn = document.getElementById("soundBtn");
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const countdownEl = document.getElementById("countdown");
+
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+  // -----------------------------
+  // SOUND (full: toggle + kickoff + goal + boost hiss + impact thumps)
+  // -----------------------------
+  const Sound = (() => {
+    let ac = null;
+    let master = null;
+    let enabled = false;
+    let muted = true;
+
+    // boost hiss
+    let boostSrc = null;
+    let boostFilter = null;
+    let boostGain = null;
+
+    function isMuted(){ return muted; }
+    function isOn(){ return !!(ac && ac.state === "running" && enabled && !muted); }
+
+    function applyGain(){
+      if(!master) return;
+      master.gain.value = muted ? 0.0 : 0.55;
+    }
+
+    function ensure(){
+      try{
+        if(!ac){
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          ac = new AudioContext();
+
+          master = ac.createGain();
+          master.connect(ac.destination);
+
+          boostGain = ac.createGain();
+          boostGain.gain.value = 0.0;
+
+          boostFilter = ac.createBiquadFilter();
+          boostFilter.type = "bandpass";
+          boostFilter.frequency.value = 600;
+          boostFilter.Q.value = 0.9;
+
+          boostFilter.connect(boostGain);
+          boostGain.connect(master);
+
+          enabled = true;
+          applyGain();
+        }
+        ac.resume?.();
+      } catch(e) {}
+    }
+
+    function toggle(){
+      ensure();
+      muted = !muted;
+      applyGain();
+      if(muted) stopBoost();
+      soundBtn.textContent = `Sound: ${muted ? "OFF" : "ON"}`;
+    }
+
+    function makeNoiseBuffer(){
+      const len = ac.sampleRate * 1.5;
+      const buf = ac.createBuffer(1, len, ac.sampleRate);
+      const data = buf.getChannelData(0);
+      for(let i=0;i<len;i++){
+        data[i] = (Math.random()*2 - 1) * 0.55;
+      }
+      return buf;
+    }
+
+    function startBoost(){
+      if(!enabled || !ac || muted) return;
+      if(boostSrc) return;
+
+      const src = ac.createBufferSource();
+      src.buffer = makeNoiseBuffer();
+      src.loop = true;
+      src.connect(boostFilter);
+
+      boostGain.gain.cancelScheduledValues(ac.currentTime);
+      boostGain.gain.setValueAtTime(boostGain.gain.value, ac.currentTime);
+      boostGain.gain.linearRampToValueAtTime(0.06, ac.currentTime + 0.08);
+
+      src.start();
+      boostSrc = src;
+    }
+
+    function stopBoost(){
+      if(!enabled || !ac) return;
+      if(!boostSrc) return;
+
+      const src = boostSrc;
+      boostSrc = null;
+
+      boostGain.gain.cancelScheduledValues(ac.currentTime);
+      boostGain.gain.setValueAtTime(boostGain.gain.value, ac.currentTime);
+      boostGain.gain.linearRampToValueAtTime(0.0, ac.currentTime + 0.10);
+
+      const stopAt = ac.currentTime + 0.12;
+      try{ src.stop(stopAt); } catch(e){}
+    }
+
+    function setBoost(on, intensity01, speed01){
+      if(!enabled || !ac || ac.state !== "running" || muted) return;
+
+      if(on) startBoost();
+      else stopBoost();
+
+      if(on && boostSrc){
+        const t = ac.currentTime;
+        const base = 500 + 600 * clamp(speed01,0,1);
+        boostFilter.frequency.setTargetAtTime(base, t, 0.03);
+
+        const g = 0.03 + 0.06 * clamp(intensity01,0,1);
+        boostGain.gain.cancelScheduledValues(t);
+        boostGain.gain.setValueAtTime(boostGain.gain.value, t);
+        boostGain.gain.linearRampToValueAtTime(g, t + 0.04);
+      }
+    }
+
+    function tone(freq, dur, type="sine", gain=0.10, attack=0.003, release=0.05){
+      if(!enabled || !ac || ac.state !== "running" || muted) return;
+
+      const o = ac.createOscillator();
+      const g = ac.createGain();
+      o.type = type;
+      o.frequency.value = freq;
+
+      g.gain.value = 0.0001;
+      o.connect(g);
+      g.connect(master);
+
+      const t = ac.currentTime;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(gain, t + attack);
+      g.gain.linearRampToValueAtTime(0.0001, t + dur);
+      o.start(t);
+      o.stop(t + dur + release);
+    }
+
+    function thump(strength01, bright=false){
+      if(!enabled || !ac || ac.state !== "running" || muted) return;
+
+      const s = clamp(strength01, 0, 1);
+      const base = bright ? 140 : 110;
+      const gain = 0.03 + 0.12 * s;
+
+      tone(base + 40*s, 0.06 + 0.03*s, "triangle", gain*0.75, 0.002, 0.08);
+      if(s > 0.25){
+        tone(1100 + 700*s, 0.018, "square", gain*0.20, 0.001, 0.03);
+      }
+    }
+
+    function kickoffBeep(n){
+      if(!enabled || !ac || ac.state !== "running" || muted) return;
+      const map = {5: 740, 4: 700, 3: 660, 2: 620, 1: 820};
+      tone(map[n] || 700, 0.08, "sine", 0.10, 0.003, 0.06);
+    }
+
+    function goBeep(){
+      if(!enabled || !ac || ac.state !== "running" || muted) return;
+      tone(980, 0.09, "sine", 0.12, 0.003, 0.06);
+      setTimeout(()=>tone(1240, 0.08, "sine", 0.10, 0.003, 0.06), 65);
+    }
+
+    function goalBoom(){
+      if(!enabled || !ac || ac.state !== "running" || muted) return;
+      tone(92, 0.18, "triangle", 0.18, 0.004, 0.12);
+      setTimeout(()=>tone(138, 0.10, "sine", 0.10, 0.003, 0.10), 40);
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if(document.visibilityState === "visible" && enabled && ac){
+        ac.resume?.();
+      }
+    });
+
+    return { ensure, toggle, isMuted, isOn, setBoost, thump, kickoffBeep, goBeep, goalBoom };
+  })();
+
+  // Button always visible; starts OFF (muted)
+  soundBtn.textContent = "Sound: OFF";
+  soundBtn.addEventListener("click", () => Sound.toggle());
+  soundBtn.addEventListener("touchstart", () => Sound.toggle(), { passive:true });
+
+  // -----------------------------
+  // NETWORKING
+  // -----------------------------
+  const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+  let ws = null;
+  let roomCode = "";
+  let seat = ""; // "p1" or "p2"
+
+  function setStatus(s){ statusEl.textContent = s; }
+
+  function connect() {
+    if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+
+    ws = new WebSocket(wsUrl);
+    ws.onopen = () => setStatus("Connected. Create or join a room.");
+    ws.onclose = () => setStatus("Disconnected.");
+    ws.onerror = () => setStatus("WebSocket error.");
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "room") {
+        roomCode = msg.code;
+        seat = msg.seat;
+        codeEl.value = roomCode;
+        setStatus(`In room ${roomCode} as ${seat.toUpperCase()}`);
+      } else if (msg.type === "err") {
+        setStatus("Error: " + msg.msg);
+      } else if (msg.type === "state") {
+        lastSnap = msg.snap;
+      }
+    };
+  }
+
+  connect();
+
+  createBtn.onclick = () => {
+    connect();
+    ws.send(JSON.stringify({ type: "create" }));
+    setStatus("Creating room…");
+  };
+
+  joinBtn.onclick = () => {
+    connect();
+    const c = codeEl.value.trim().toUpperCase();
+    if (!c) return setStatus("Enter a room code.");
+    ws.send(JSON.stringify({ type: "join", code: c }));
+    setStatus("Joining room…");
+  };
+
+  // -----------------------------
+  // INPUT
+  // -----------------------------
+  const keyDown = new Set();
+  window.addEventListener("keydown", (e)=>{ keyDown.add(e.code); if(e.code==="Space") e.preventDefault(); }, {passive:false});
+  window.addEventListener("keyup",   (e)=>{ keyDown.delete(e.code); if(e.code==="Space") e.preventDefault(); }, {passive:false});
+
+  function readKeyboard(){
+    const left  = keyDown.has("KeyA") ? 1 : 0;
+    const right = keyDown.has("KeyD") ? 1 : 0;
+    const steer = clamp(right - left, -1, 1);
+
+    const accel = keyDown.has("KeyW");
+    const brake = keyDown.has("KeyS");
+    const boost = keyDown.has("ShiftLeft") || keyDown.has("ShiftRight");
+    const drift = keyDown.has("Space");
+
+    return { steer, accel, accelAmt: accel?1:0, brake, brakeAmt: brake?1:0, drift, boost };
+  }
+
+  function readGamepad(){
+    const p = navigator.getGamepads?.()[0];
+    if(!p) return null;
+
+    const dz=0.14;
+    const lx=p.axes[0] ?? 0;
+    let steer = Math.abs(lx)<dz ? 0 : lx;
+    steer = Math.sign(steer) * (Math.abs(steer) ** 0.5);
+
+    const rt = p.buttons[7]?.value ?? 0;           // accelerate
+    const lt = p.buttons[6]?.value ?? 0;           // brake/reverse
+    const drift = p.buttons[2]?.pressed ?? false;  // square
+    const boost = p.buttons[5]?.pressed ?? false;  // R1
+
+    return {
+      steer: clamp(steer,-1,1),
+      accel: rt>0.10, accelAmt: clamp(rt,0,1),
+      brake: lt>0.10, brakeAmt: clamp(lt,0,1),
+      drift, boost
+    };
+  }
+
+  function getInput(){
+    const kb = readKeyboard();
+    const gp = readGamepad();
+    if(!gp) return kb;
+
+    const gpActive =
+      Math.abs(gp.steer)>0.02 || gp.accel || gp.brake || gp.boost || gp.drift ||
+      gp.accelAmt>0.05 || gp.brakeAmt>0.05;
+
+    return gpActive ? gp : kb;
+  }
+
+  // Send inputs ~60Hz
+  let lastInputSend = 0;
+  function sendInput(t){
+    if(!ws || ws.readyState !== 1 || !roomCode) return;
+    if(t - lastInputSend < 16) return;
+    lastInputSend = t;
+
+    const i = getInput();
+    ws.send(JSON.stringify({ type: "input", i }));
+  }
+
+  // -----------------------------
+  // RENDERING + SOUND EVENTS FROM SNAPSHOTS
+  // -----------------------------
+  let lastSnap = null;
+
+  // For sound event detection
+  let prevScoreL = 0, prevScoreR = 0;
+  let prevCountdownText = "";
+  let prevBallVx = 0, prevBallVy = 0;
+  let lastThumpAt = 0;
+
+  function countdownColour(kickoffTimer){
+    if(kickoffTimer > 0){
+      const n = Math.ceil(kickoffTimer);
+      if(n >= 5) return "rgba(255, 213, 74, 0.98)";
+      if(n === 4) return "rgba(255, 138, 61, 0.98)";
+      if(n === 3) return "rgba(255, 59, 59, 0.98)";
+      return "rgba(73, 230, 140, 0.98)";
+    }
+    return "rgba(73, 230, 140, 0.98)";
+  }
+
+  function roundRectFill(x,y,w,h,r){
+    r = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y, x+w,y+h, r);
+    ctx.arcTo(x+w,y+h, x,y+h, r);
+    ctx.arcTo(x,y+h, x,y, r);
+    ctx.arcTo(x,y, x+w,y, r);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawCar(car, color){
+    ctx.save();
+    ctx.translate(car.x, car.y);
+    ctx.rotate(car.a);
+
+    const L = 38, Wc = 22;
+    const rear = -L/2, front = L/2;
+    const halfW = Wc/2;
+    const noseR = 10;
+
+    ctx.beginPath();
+    ctx.moveTo(rear, -halfW);
+    ctx.lineTo(rear,  halfW);
+    ctx.lineTo(front - noseR,  halfW);
+    ctx.arc(front - noseR, halfW - noseR, noseR, Math.PI/2, 0, true);
+    ctx.arc(front - noseR, -halfW + noseR, noseR, 0, -Math.PI/2, true);
+    ctx.closePath();
+
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.38)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Wheels
+    ctx.fillStyle = "rgba(8,8,8,0.95)";
+    const wheelR = 4, wheelXFront = 10, wheelXRear = -10, wheelYOffset = halfW + 2;
+    ctx.beginPath(); ctx.arc(wheelXFront, -wheelYOffset, wheelR, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(wheelXFront,  wheelYOffset, wheelR, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(wheelXRear,  -wheelYOffset, wheelR, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(wheelXRear,   wheelYOffset, wheelR, 0, Math.PI*2); ctx.fill();
+
+    // Direction line
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(front,0); ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawBall(b){
+    ctx.save();
+    ctx.translate(b.x, b.y);
+
+    ctx.fillStyle = "rgba(255,255,255,0.96)";
+    ctx.beginPath(); ctx.arc(0, 0, 25, 0, Math.PI*2); ctx.fill();
+
+    // rolling stripes
+    ctx.save();
+    ctx.beginPath(); ctx.arc(0,0,25,0,Math.PI*2); ctx.clip();
+    ctx.rotate(b.spin || 0);
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = "#000";
+    for(let x=-60;x<=60;x+=22) ctx.fillRect(x,-60,10,120);
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  function draw(s){
+    const field = s.field;
+    const UI_TOP=44, UI_BOTTOM=56;
+
+    ctx.clearRect(0,0,980,560);
+
+    // pitch stripes
+    ctx.fillStyle="#0b3b1b";
+    ctx.fillRect(field.l, field.t, field.r-field.l, field.b-field.t);
+    const stripeCount=10;
+    const sw=(field.r-field.l)/stripeCount;
+    for(let i=0;i<stripeCount;i++){
+      ctx.fillStyle=(i%2===0)?"#0e4a23":"#0c3f1f";
+      ctx.fillRect(field.l+i*sw, field.t, sw, field.b-field.t);
+    }
+
+    // lines
+    ctx.save();
+    ctx.strokeStyle="rgba(255,255,255,0.78)"; ctx.lineWidth=3;
+    ctx.strokeRect(field.l, field.t, field.r-field.l, field.b-field.t);
+
+    ctx.strokeStyle="rgba(255,255,255,0.55)"; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(field.mx, field.t); ctx.lineTo(field.mx, field.b); ctx.stroke();
+    ctx.beginPath(); ctx.arc(field.mx, field.my, 82, 0, Math.PI*2); ctx.stroke();
+
+    ctx.strokeStyle="rgba(255,255,255,0.75)"; ctx.lineWidth=3;
+    ctx.strokeRect(field.l - s.goal.d, field.my - s.goal.w/2, s.goal.d, s.goal.w);
+    ctx.strokeRect(field.r,            field.my - s.goal.w/2, s.goal.d, s.goal.w);
+    ctx.restore();
+
+    // pads
+    ctx.save();
+    const flick = (Math.floor((s.t/1000)*10) % 2) === 0;
+    for(const p of s.pads){
+      const active = (p.t <= 0.001);
+      if(active){
+        const ring = flick ? "rgba(255, 211, 77, 0.98)" : "rgba(255, 140, 64, 0.98)";
+        const fill = flick ? "rgba(255, 211, 77, 0.35)" : "rgba(255, 140, 64, 0.35)";
+        ctx.lineWidth=3; ctx.strokeStyle=ring;
+        ctx.beginPath(); ctx.arc(p.x,p.y,14+3,0,Math.PI*2); ctx.stroke();
+        ctx.fillStyle=fill;
+        ctx.beginPath(); ctx.arc(p.x,p.y,14-2,0,Math.PI*2); ctx.fill();
+      } else {
+        ctx.globalAlpha=0.2;
+        ctx.lineWidth=2; ctx.strokeStyle="rgba(180,210,255,0.95)";
+        ctx.beginPath(); ctx.arc(p.x,p.y,14+2,0,Math.PI*2); ctx.stroke();
+        ctx.globalAlpha=1;
+      }
+    }
+    ctx.restore();
+
+    // entities
+    drawBall(s.ball);
+    drawCar(s.blue, "#2fb8ff");
+    drawCar(s.red,  "#ff5454");
+
+    // UI bars
+    ctx.fillStyle="#0a1e3b";
+    ctx.fillRect(0,0,980,UI_TOP);
+    ctx.fillRect(0,560-UI_BOTTOM,980,UI_BOTTOM);
+
+    // score
+    ctx.font="800 22px system-ui";
+    ctx.fillStyle="rgba(255,255,255,0.95)";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText(`${s.scoreL}  -  ${s.scoreR}`, 980/2, UI_TOP/2 + 1);
+
+    // boost (show your own)
+    const me = (seat === "p2") ? s.red : s.blue;
+    const bx=18, by=560-UI_BOTTOM+14, bw=240, bh=18;
+    ctx.font="700 14px system-ui";
+    ctx.fillStyle="rgba(255,255,255,0.9)";
+    ctx.textAlign="left"; ctx.textBaseline="bottom";
+    ctx.fillText("BOOST", bx, by-4);
+
+    ctx.globalAlpha=0.95;
+    ctx.fillStyle="rgba(255,255,255,0.14)";
+    roundRectFill(bx,by,bw,bh,10);
+
+    const pct=clamp(me.boost,0,100)/100;
+    if(pct>0){
+      const g=ctx.createLinearGradient(bx,0,bx+bw,0);
+      g.addColorStop(0.0,"#ffd54a"); g.addColorStop(0.6,"#ff8a3d"); g.addColorStop(1.0,"#ff3b3b");
+      ctx.fillStyle=g;
+      roundRectFill(bx,by,bw*pct,bh,10);
+    }
+
+    // countdown overlay
+    if(s.kickoffActive){
+      countdownEl.style.opacity = 1;
+      countdownEl.style.color = countdownColour(s.kickoffTimer);
+      countdownEl.textContent = s.kickoffTimer > 0 ? String(Math.ceil(s.kickoffTimer)) : "GO";
+    } else {
+      countdownEl.style.opacity = 0;
+      countdownEl.textContent = "";
+    }
+  }
+
+  function driveSoundsFromState(s){
+    // 1) goal boom when score changes
+    if(s.scoreL !== prevScoreL || s.scoreR !== prevScoreR){
+      Sound.goalBoom();
+      prevScoreL = s.scoreL;
+      prevScoreR = s.scoreR;
+    }
+
+    // 2) kickoff beeps driven by countdown text change
+    if(s.kickoffActive){
+      const txt = s.kickoffTimer > 0 ? String(Math.ceil(s.kickoffTimer)) : "GO";
+      if(txt !== prevCountdownText){
+        if(txt === "GO") Sound.goBeep();
+        else {
+          const n = parseInt(txt,10);
+          if(Number.isFinite(n)) Sound.kickoffBeep(n);
+        }
+        prevCountdownText = txt;
+      }
+    } else {
+      prevCountdownText = "";
+    }
+
+    // 3) boost hiss for YOUR car
+    if(seat){
+      const me = (seat === "p2") ? s.red : s.blue;
+      const speed = Math.hypot(me.vx, me.vy);
+      const speed01 = clamp(speed / 780, 0, 1);
+      const intensity01 = clamp(me.boost / 100, 0, 1);
+      Sound.setBoost(!!me.boosting, intensity01, speed01);
+    } else {
+      Sound.setBoost(false, 0, 0);
+    }
+
+    // 4) impact thumps: detect sudden change in ball velocity (cheap but effective)
+    // Avoid spamming by cooldown + thresholding
+    const bvx = s.ball.vx || 0;
+    const bvy = s.ball.vy || 0;
+    const dvx = bvx - prevBallVx;
+    const dvy = bvy - prevBallVy;
+    prevBallVx = bvx;
+    prevBallVy = bvy;
+
+    const dv = Math.hypot(dvx, dvy);
+    const ballSpeed = Math.hypot(bvx, bvy);
+
+    const now = performance.now();
+    if(now - lastThumpAt > 70){
+      // tuned thresholds so it triggers on meaningful hits
+      if(dv > 260 && ballSpeed > 140){
+        const strength = clamp(dv / 900, 0, 1);
+        const bright = dv > 520; // harder hit => brighter click
+        Sound.thump(strength, bright);
+        lastThumpAt = now;
+      }
+    }
+  }
+
+  function loop(t){
+    sendInput(t);
+    if(lastSnap){
+      draw(lastSnap);
+      driveSoundsFromState(lastSnap);
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
