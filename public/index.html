@@ -22,6 +22,21 @@
     pointer-events:none; opacity:0;
     transition:opacity .15s;
   }
+  #soundBtn{
+  position:absolute;
+  right:12px;
+  bottom:12px;
+  z-index:5;
+  padding:10px 14px;
+  border-radius:12px;
+  border:1px solid rgba(255,255,255,.18);
+  background:rgba(10,30,59,.90);
+  color:#e8eefc;
+  font-weight:800;
+  cursor:pointer;
+  user-select:none;
+}
+#soundBtn:active{transform:scale(.98)}
   #hint{max-width:980px;opacity:.8;font-size:14px;line-height:1.35;text-align:center}
 </style>
 </head>
@@ -34,11 +49,12 @@
     <span id="status">Not connected</span>
   </div>
 
-  <div id="stage">
-    <canvas id="c" width="980" height="560"></canvas>
-    <div id="countdown"></div>
-  </div>
-
+<div id="stage">
+  <canvas id="c" width="980" height="560"></canvas>
+  <div id="countdown"></div>
+  <button id="soundBtn" type="button">Sound: OFF</button>
+</div>
+  
   <div id="hint">
     Controls: <b>W</b>/<b>S</b> accelerate brake+reverse, <b>A</b>/<b>D</b> steer, <b>Space</b> drift, <b>Shift</b> boost. Controller still works too.
     <br>Player 1 is blue. Player 2 is red. Share the page link + room code.
